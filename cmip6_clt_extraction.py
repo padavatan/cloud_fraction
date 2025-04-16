@@ -33,79 +33,180 @@ def get_connection():
     return SearchConnection('https://esgf-node.llnl.gov/esg-search', distrib=True)
 
 def find_matching_variants():
-    """Find models with matching variants for both historical and ssp585."""
+    """Find models with matching variants for both historical and ssp585.
+    Searches ssp585 first since it typically has fewer available models."""
     conn = get_connection()
     
     print("Searching for models with daily cloud cover (clt) data...")
     print("This may take a few minutes. Please be patient.")
     
-    # Store results by model and variant
-    results_by_exp = {'historical': defaultdict(list), 'ssp585': defaultdict(list)}
+    # Define facets of interest for the search (resolves the warning)
+    facets = 'project,experiment_id,source_id,institution_id,variant_label,grid_label,frequency,variable'
     
-    # Search for each experiment
-    for experiment in SEARCH_PARAMS['experiments']:
-        print(f"\nSearching for {experiment} experiment datasets...")
-        
-        # Create search context
-        ctx = conn.new_context(
-            project=SEARCH_PARAMS['project'],
-            experiment_id=experiment,
-            variable=SEARCH_PARAMS['variable'],
-            frequency=SEARCH_PARAMS['frequency'],
-            latest=True
-        )
-        
-        # Execute search
-        results = ctx.search()
-        print(f"Found {len(results)} initial {experiment} datasets")
-        
-        # Process results
-        for ds in results:
-            try:
-                # Extract metadata
-                metadata = ds.json['metadata']
-                source_id = metadata.get('source_id', [''])[0]  # Model name
-                institute = metadata.get('institution_id', [''])[0]
-                variant = metadata.get('variant_label', [''])[0]
-                grid = metadata.get('grid_label', [''])[0]
-                
-                model_key = f"{source_id}.{institute}"
-                variant_key = f"{variant}.{grid}"
-                
-                # Store dataset info
-                results_by_exp[experiment][model_key].append({
-                    'variant': variant,
-                    'grid': grid,
-                    'variant_key': variant_key,
-                    'dataset_id': ds.dataset_id,
-                    'model': source_id,
-                    'institute': institute
-                })
-            except Exception as e:
-                continue  # Skip problematic entries
+    # Store all matched models by experiment
+    ssp585_models = {}
+    historical_models = {}
     
-    # Find models with matching variants
+    # OPTIMIZED ORDER: Search for ssp585 experiment datasets FIRST since they're fewer
+    print("\nSearching for ssp585 experiment datasets...")
+    ssp_ctx = conn.new_context(
+        facets=facets,
+        project=SEARCH_PARAMS['project'],
+        experiment_id='ssp585',
+        variable=SEARCH_PARAMS['variable'],
+        frequency=SEARCH_PARAMS['frequency'],
+        latest=True
+    )
+    
+    # Execute ssp585 search
+    ssp_results = ssp_ctx.search()
+    print(f"Found {len(ssp_results)} initial ssp585 datasets")
+    
+    # Process ssp585 results
+    print("Processing ssp585 datasets...")
+    
+    # Keep track of models we've seen to avoid duplicates
+    seen_models = set()
+    
+    for ds in ssp_results:
+        try:
+            # Extract metadata
+            source_id = ds.json.get('source_id', [''])[0]  # Model name
+            institute = ds.json.get('institution_id', [''])[0]
+            variant = ds.json.get('variant_label', [''])[0]
+            grid = ds.json.get('grid_label', [''])[0]
+            
+            # Create a unique identifier for this model
+            model_key = f"{source_id}"
+            
+            # Skip if we've already seen this model (to ensure uniqueness)
+            if model_key in seen_models:
+                continue
+                
+            # Mark this model as seen
+            seen_models.add(model_key)
+            
+            # Create a unique identifier for this model/variant combination
+            model_variant_key = f"{source_id}_{variant}_{grid}"
+            
+            # Store dataset info
+            ssp585_models[model_variant_key] = {
+                'variant': variant,
+                'grid': grid,
+                'dataset_id': ds.dataset_id,
+                'model': source_id,
+                'institute': institute
+            }
+        except Exception as e:
+            print(f"Error processing ssp585 dataset: {e}")
+            continue  # Skip problematic entries
+    
+    print(f"Processed {len(ssp585_models)} unique model-variant combinations for ssp585 experiment")
+    
+    # Now search for historical experiment datasets for the models we found in ssp585
+    print("\nSearching for historical experiment datasets...")
+    
+    # Reset seen models
+    seen_models = set()
+    
+    # Get the list of models we have in ssp585
+    ssp_models_list = list(set(info['model'] for info in ssp585_models.values()))
+    print(f"Searching for historical data from {len(ssp_models_list)} models found in ssp585")
+    
+    hist_ctx = conn.new_context(
+        facets=facets,
+        project=SEARCH_PARAMS['project'],
+        experiment_id='historical',
+        variable=SEARCH_PARAMS['variable'],
+        frequency=SEARCH_PARAMS['frequency'],
+        latest=True
+    )
+    
+    # Execute historical search
+    hist_results = hist_ctx.search()
+    print(f"Found {len(hist_results)} initial historical datasets")
+    
+    # Process historical results
+    print("Processing historical datasets...")
+    for ds in hist_results:
+        try:
+            # Extract metadata
+            source_id = ds.json.get('source_id', [''])[0]  # Model name
+            
+            # Skip if this model isn't in our ssp585 results
+            if source_id not in ssp_models_list:
+                continue
+                
+            institute = ds.json.get('institution_id', [''])[0]
+            variant = ds.json.get('variant_label', [''])[0]
+            grid = ds.json.get('grid_label', [''])[0]
+            
+            # Create a unique identifier for this model
+            model_key = f"{source_id}"
+            
+            # Skip if we've already seen this model (to ensure uniqueness)
+            if model_key in seen_models:
+                continue
+                
+            # Mark this model as seen
+            seen_models.add(model_key)
+            
+            # Create a unique identifier for this model/variant combination
+            model_variant_key = f"{source_id}_{variant}_{grid}"
+            
+            # Store dataset info
+            historical_models[model_variant_key] = {
+                'variant': variant,
+                'grid': grid,
+                'dataset_id': ds.dataset_id,
+                'model': source_id,
+                'institute': institute
+            }
+        except Exception as e:
+            print(f"Error processing historical dataset: {e}")
+            continue  # Skip problematic entries
+    
+    print(f"Processed {len(historical_models)} unique model-variant combinations for historical experiment")
+    
+    # Find common model-variant combinations
+    common_keys = set(historical_models.keys()) & set(ssp585_models.keys())
+    
+    # Build matched models list, ensuring one variant per model
     matched_models = []
+    already_included_models = set()
     
-    for model_key in set(results_by_exp['historical'].keys()) & set(results_by_exp['ssp585'].keys()):
-        # Get variants for this model in both experiments
-        hist_variants = {v['variant_key']: v for v in results_by_exp['historical'][model_key]}
-        ssp_variants = {v['variant_key']: v for v in results_by_exp['ssp585'][model_key]}
+    print("\nFinding matching model variants between experiments...")
+    for key in common_keys:
+        hist_info = historical_models[key]
+        ssp_info = ssp585_models[key]
         
-        # Find common variants
-        common_variants = set(hist_variants.keys()) & set(ssp_variants.keys())
+        # Skip if we've already included this model
+        model_name = hist_info['model']
+        if model_name in already_included_models:
+            continue
+            
+        # Mark this model as included
+        already_included_models.add(model_name)
         
-        for variant_key in common_variants:
-            matched_models.append({
-                'model': hist_variants[variant_key]['model'],
-                'institute': hist_variants[variant_key]['institute'],
-                'variant': hist_variants[variant_key]['variant'],
-                'grid': hist_variants[variant_key]['grid'],
-                'historical_dataset': hist_variants[variant_key]['dataset_id'],
-                'ssp585_dataset': ssp_variants[variant_key]['dataset_id']
-            })
+        matched_models.append({
+            'model': hist_info['model'],
+            'institute': hist_info['institute'],
+            'variant': hist_info['variant'],
+            'grid': hist_info['grid'],
+            'historical_dataset': hist_info['dataset_id'],
+            'ssp585_dataset': ssp_info['dataset_id']
+        })
     
-    print(f"\nFound {len(matched_models)} models with matching variants for both experiments")
+    print(f"Found {len(matched_models)} unique models with matching variants for both experiments")
+    
+    # Print some examples of matched models for verification
+    if matched_models:
+        print("\nExample matches:")
+        for i, model in enumerate(matched_models[:5]):  # Show up to 5 examples
+            print(f"  {i+1}. {model['model']} {model['variant']} ({model['institute']})")
+        if len(matched_models) > 5:
+            print(f"  ... and {len(matched_models)-5} more")
+    
     return matched_models
 
 def generate_wget_scripts(matched_models, output_dir="./wget_scripts"):
@@ -192,6 +293,14 @@ def main():
     
     if not matched_models:
         print("No matching models found. Exiting.")
+        print("\nPossible reasons for no matches:")
+        print("1. The search criteria might be too restrictive")
+        print("2. There may be no models with exactly matching variants across both experiments")
+        print("3. The ESGF index might be temporarily unavailable or incomplete")
+        print("\nTry these fixes:")
+        print("1. Check ESGF web portal to verify data availability: https://esgf-node.llnl.gov/search/cmip6/")
+        print("2. Try relaxing the search criteria, e.g., search for monthly instead of daily data")
+        print("3. Try again later as ESGF indexes are periodically updated")
         return
     
     # Generate wget scripts
@@ -202,10 +311,10 @@ def main():
     print("\nData Extraction Instructions:")
     print("----------------------------")
     print(f"1. Navigate to the output directory: cd {output_dir}")
-    print("2. Create directories for each model you want to download")
-    print("3. Execute the wget scripts to download data:")
+    print("2. Execute the wget scripts to download data:")
     print("   For historical data: ./model_name_variant/historical_wget.sh")
     print("   For ssp585 data: ./model_name_variant/ssp585_wget.sh")
+    print("3. You may need to create an ESGF account and add credentials for datasets requiring authentication")
     print("\nTop 5 models by total file count:")
     
     # Calculate total files and sort
@@ -215,6 +324,9 @@ def main():
     for _, row in top_models.iterrows():
         print(f"  {row['model']} {row['variant']}: {row['total_files']} files " 
               f"({row['historical_files']} historical, {row['ssp585_files']} ssp585)")
+    
+    print("\nNote: For large models with many files, you may want to subset data by time period")
+    print("or geographical region before downloading. Consider using OPeNDAP for this purpose.")
 
 if __name__ == "__main__":
     main()
